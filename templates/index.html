@@ -825,6 +825,20 @@
           </div>
         </div>
 
+        <!-- xAI Grok SuperGrok OAuth -->
+        <div class="card" style="border-left:3px solid #6272ff;padding:14px 16px;">
+          <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:#c9d1d9;">🔑 xAI Grok (SuperGrok — OAuth, no API key)</p>
+          <p class="hint" style="margin:0 0 10px;">SuperGrok uses OAuth instead of an API key. To use it on Railway:</p>
+          <ol class="hint" style="margin:0 0 10px;padding-left:18px;line-height:1.8;">
+            <li>Install Hermes locally: <code>pip install hermes-agent</code></li>
+            <li>Run <code>hermes model</code> → pick <strong>xAI Grok OAuth (SuperGrok)</strong> → complete browser login</li>
+            <li>Copy the contents of <code>~/.hermes/auth.json</code></li>
+            <li>Set <code>HERMES_AUTH_JSON_BOOTSTRAP</code> in Railway Variables to that JSON</li>
+            <li>Redeploy, then open the <a href="/?force=1" style="color:var(--accent2);">Hermes Dashboard</a> → model picker → select xAI Grok OAuth</li>
+          </ol>
+          <p class="hint" style="margin:0;">Tokens auto-refresh. Set <code>LLM_MODEL</code> to <code>grok-4</code> or <code>grok-3-mini</code>.</p>
+        </div>
+
         <!-- Messaging Channels -->
         <div class="section-label">
           Messaging Channels
@@ -1272,12 +1286,13 @@ function app() {
     providerMap: {
       'OpenRouter':         { key: 'OPENROUTER_API_KEY',  placeholder: 'sk-or-...' },
       'DeepSeek':           { key: 'DEEPSEEK_API_KEY',     placeholder: 'sk-...'    },
-      'DashScope':          { key: 'DASHSCOPE_API_KEY',    placeholder: ''          },
+      'Qwen Cloud':         { key: 'DASHSCOPE_API_KEY',    placeholder: ''          },
       'GLM / Z.AI':         { key: 'GLM_API_KEY',          placeholder: ''          },
       'Kimi':               { key: 'KIMI_API_KEY',          placeholder: ''          },
       'MiniMax':            { key: 'MINIMAX_API_KEY',       placeholder: ''          },
       'HuggingFace':        { key: 'HF_TOKEN',              placeholder: 'hf_...'   },
       'NVIDIA NIM':         { key: 'NVIDIA_API_KEY',        placeholder: 'nvapi-...' },
+      'NovitaAI':           { key: 'NOVITA_API_KEY',        placeholder: ''          },
       'Arcee AI':           { key: 'ARCEE_API_KEY',         placeholder: ''          },
       'Step Plan':          { key: 'STEPFUN_API_KEY',       placeholder: ''          },
       'Vercel AI Gateway':  { key: 'AI_GATEWAY_API_KEY',    placeholder: ''          },

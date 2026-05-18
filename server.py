@@ -82,20 +82,21 @@ ENV_VARS = [
     ("LLM_MODEL",               "Model",                    "model",     False),
     ("OPENROUTER_API_KEY",       "OpenRouter",               "provider",  True),
     ("DEEPSEEK_API_KEY",         "DeepSeek",                 "provider",  True),
-    ("DASHSCOPE_API_KEY",        "DashScope",                "provider",  True),
+    ("DASHSCOPE_API_KEY",        "Qwen Cloud (DashScope)",   "provider",  True),
     ("GLM_API_KEY",              "GLM / Z.AI",               "provider",  True),
     ("KIMI_API_KEY",             "Kimi",                     "provider",  True),
     ("MINIMAX_API_KEY",          "MiniMax",                  "provider",  True),
     ("HF_TOKEN",                 "Hugging Face",             "provider",  True),
-    # Added in v2026.4.23 (hermes v0.11.0). All plain API-key auth — hermes
+    # Added in v2026.4.23+ (hermes v0.11.0+). All plain API-key auth — hermes
     # auto-routes by env-var presence, no extra config needed on our side.
-    # OAuth-based providers (Gemini CLI, Qwen OAuth, Claude Code, Copilot)
-    # are reachable via the dashboard's Keys tab and not exposed here.
+    # OAuth-based providers (xAI Grok SuperGrok, Gemini CLI, Qwen OAuth, Claude Code)
+    # are set up via the dashboard's Keys tab or HERMES_AUTH_JSON_BOOTSTRAP.
     ("NVIDIA_API_KEY",           "NVIDIA NIM",               "provider",  True),
     ("ARCEE_API_KEY",            "Arcee AI",                 "provider",  True),
     ("STEPFUN_API_KEY",          "Step Plan",                "provider",  True),
     ("AI_GATEWAY_API_KEY",       "Vercel AI Gateway",        "provider",  True),
     ("GEMINI_API_KEY",           "Google AI Studio",         "provider",  True),
+    ("NOVITA_API_KEY",           "NovitaAI",                 "provider",  True),
     ("PARALLEL_API_KEY",         "Parallel (search)",        "tool",      True),
     ("FIRECRAWL_API_KEY",        "Firecrawl (scrape)",       "tool",      True),
     ("TAVILY_API_KEY",           "Tavily (search)",          "tool",      True),
@@ -193,7 +194,12 @@ def write_config_yaml(data: dict[str, str]) -> None:
     # Deployment-managed (always authoritative — these reflect the runtime env).
     merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
     merged_model["default"] = model
-    merged_model["provider"] = "auto"
+    # Only force provider="auto" when a known API key is configured. If no
+    # API key is set, the user likely configured an OAuth provider (xai-oauth,
+    # qwen-oauth, etc.) via the dashboard's model picker — preserve that value
+    # so a container restart doesn't revert it to "auto" and break their session.
+    if any(data.get(k) for k in PROVIDER_KEYS):
+        merged_model["provider"] = "auto"
     merged["model"] = merged_model
 
     merged_terminal = dict(merged.get("terminal") if isinstance(merged.get("terminal"), dict) else {})
@@ -555,6 +561,11 @@ class Dashboard:
                 "--host", HERMES_DASHBOARD_HOST,
                 "--port", str(HERMES_DASHBOARD_PORT),
                 "--no-open",
+                # --skip-build: the Dockerfile pre-builds the React dashboard
+                # into hermes_cli/web_dist/ at image time. This flag tells
+                # hermes to trust that dist and skip its npm build check,
+                # which would otherwise add ~30s to first startup (hermes >= v2026.5.16).
+                "--skip-build",
                 # --tui exposes /api/pty + /api/ws + /api/events so the
                 # dashboard's embedded Chat tab works end-to-end. Requires
                 # hermes >= v2026.4.23 — older releases exit immediately

@@ -744,6 +744,20 @@ async def logout(request: Request) -> Response:
 
 
 # ── Gateway manager ───────────────────────────────────────────────────────────
+# Auto-respawn tuning. When the gateway exits without us asking it to — an
+# in-band `/restart` (inside a container hermes exits 75 expecting a supervisor
+# to bring it back; verified it takes the exit-75 path, NOT a detached
+# self-restart, when /run/.containerenv or /.dockerenv exists), a crash, or an
+# OOM kill — server.py is that supervisor and must restart it. Nothing else
+# will, and /health stays 200, so the bot would otherwise sit silently dead.
+# A crash-loop guard stops us hammering a gateway that genuinely can't stay up
+# (e.g. a bad provider key / model).
+RESPAWN_WINDOW_S   = 120     # rolling window (s) for counting unexpected exits
+RESPAWN_MAX_IN_WIN = 5       # give up auto-restart after this many exits in window
+RESPAWN_BASE_DELAY = 2.0     # first backoff (seconds)
+RESPAWN_MAX_DELAY  = 30.0    # backoff cap
+
+
 class Gateway:
     def __init__(self):
         self.proc: asyncio.subprocess.Process | None = None
@@ -751,11 +765,23 @@ class Gateway:
         self.logs: deque[str] = deque(maxlen=500)
         self.started_at: float | None = None
         self.restarts = 0
+        # True while a deliberate stop()/restart()/reset is in flight, so the
+        # exiting process's _drain() doesn't fire an auto-respawn that races the
+        # intentional lifecycle.
+        self._stopping = False
+        # Monotonic timestamps of recent unexpected exits (crash-loop guard).
+        self._recent_exits: list[float] = []
 
-    async def start(self):
+    async def start(self, *, reset_budget: bool = True):
         if self.proc and self.proc.returncode is None:
             return
+        # A manual Start/Restart (or boot) grants a fresh crash-loop budget; the
+        # auto-respawn path passes reset_budget=False so repeated crashes keep
+        # accumulating toward the give-up threshold.
+        if reset_budget:
+            self._recent_exits.clear()
         self.state = "starting"
+        self._stopping = False
         try:
             # .env values take priority over Railway env vars.
             # We build the env this way so hermes's own dotenv loading
@@ -775,12 +801,13 @@ class Gateway:
             )
             self.state = "running"
             self.started_at = time.time()
-            asyncio.create_task(self._drain())
+            asyncio.create_task(self._drain(self.proc))
         except Exception as e:
             self.state = "error"
             self.logs.append(f"[error] Failed to start: {e}")
 
     async def stop(self):
+        self._stopping = True
         if not self.proc or self.proc.returncode is not None:
             self.state = "stopped"
             return
@@ -799,14 +826,74 @@ class Gateway:
         self.restarts += 1
         await self.start()
 
-    async def _drain(self):
-        assert self.proc and self.proc.stdout
-        async for raw in self.proc.stdout:
+    async def _drain(self, proc: asyncio.subprocess.Process):
+        assert proc.stdout
+        async for raw in proc.stdout:
             line = ANSI_ESCAPE.sub("", raw.decode(errors="replace").rstrip())
             self.logs.append(line)
-        if self.state == "running":
-            self.state = "error"
-            self.logs.append(f"[error] Gateway exited (code {self.proc.returncode})")
+        rc = proc.returncode
+        # Ignore the drain of a process we've already replaced (e.g. via restart()).
+        if proc is not self.proc:
+            return
+        # A deliberate stop()/restart()/reset owns its own lifecycle — don't respawn.
+        if self._stopping:
+            return
+        # Unexpected exit: in-band `/restart` (exit 75), a crash, or an OOM kill.
+        # On Railway nothing else brings the gateway back, so we supervise it.
+        self.state = "error"
+        self.logs.append(f"[gateway] exited (code {rc}) — supervising restart")
+        asyncio.create_task(self._supervise_respawn(proc.pid))
+
+    async def _supervise_respawn(self, dead_pid: int | None):
+        # Crash-loop guard: count unexpected exits inside a rolling window and
+        # give up (rather than hammer) once they exceed the threshold.
+        now = time.monotonic()
+        self._recent_exits = [t for t in self._recent_exits if now - t < RESPAWN_WINDOW_S]
+        self._recent_exits.append(now)
+        if len(self._recent_exits) > RESPAWN_MAX_IN_WIN:
+            self.state = "crashed"
+            self.logs.append(
+                f"[gateway] crash-looping ({len(self._recent_exits)} exits in "
+                f"{RESPAWN_WINDOW_S}s) — giving up auto-restart. Fix the provider/"
+                f"model in the admin UI, then Start/Restart the gateway."
+            )
+            return
+        delay = min(RESPAWN_BASE_DELAY * 2 ** (len(self._recent_exits) - 1), RESPAWN_MAX_DELAY)
+        self.logs.append(f"[gateway] restarting in {int(delay)}s (attempt {len(self._recent_exits)})")
+        await asyncio.sleep(delay)
+        # Re-check the deliberate-lifecycle conditions AFTER the backoff sleep: a
+        # Stop, Reset, or shutdown issued during the wait must win over the respawn.
+        if self._stopping:
+            self.logs.append("[gateway] restart cancelled (stopped/reconfigured)")
+            return
+        if self.proc and self.proc.returncode is None:
+            return  # a manual Start already brought a live gateway back
+        if not is_config_complete():
+            self.state = "stopped"
+            self.logs.append("[gateway] restart skipped — provider/model not configured")
+            return
+        # Clear a pid file left stale by a hard crash (SIGKILL/OOM skips hermes'
+        # atexit cleanup) so the respawn's own O_EXCL pid claim can't bail with
+        # "PID file race lost". Scoped to the pid we just buried — never disturbs
+        # a live gateway's lock.
+        self._clear_stale_pidfile(dead_pid)
+        self.restarts += 1
+        await self.start(reset_budget=False)
+
+    def _clear_stale_pidfile(self, dead_pid: int | None) -> None:
+        if dead_pid is None:
+            return
+        pid_file = Path(HERMES_HOME) / "gateway.pid"
+        try:
+            rec = json.loads(pid_file.read_text())
+        except Exception:
+            return
+        if rec.get("pid") == dead_pid:
+            try:
+                pid_file.unlink()
+                self.logs.append(f"[gateway] cleared stale pid file (pid {dead_pid})")
+            except OSError:
+                pass
 
     def status(self) -> dict:
         uptime = int(time.time() - self.started_at) if self.started_at and self.state == "running" else None

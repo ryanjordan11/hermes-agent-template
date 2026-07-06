@@ -214,7 +214,7 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
-def write_config_yaml(data: dict[str, str]) -> None:
+def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> None:
     """Write config.yaml — deep-merge template defaults with any existing user/cron-managed sections.
 
     Previously this overwrote ``$HERMES_HOME/config.yaml`` with a hardcoded template
@@ -249,14 +249,22 @@ def write_config_yaml(data: dict[str, str]) -> None:
     merged = dict(existing)
 
     # Deployment-managed (always authoritative — these reflect the runtime env).
-    merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
-    merged_model["default"] = model
-    # Only force provider="auto" when a known API key is configured. If no
-    # API key is set, the user likely configured an OAuth provider (xai-oauth,
-    # qwen-oauth, etc.) via the dashboard's model picker — preserve that value
-    # so a container restart doesn't revert it to "auto" and break their session.
-    if any(data.get(k) for k in PROVIDER_KEYS):
-        merged_model["provider"] = "auto"
+    if reset_model:
+        # Config reset: wipe the model block to a clean slate. Preserving the old
+        # provider/base_url here would leave stale routing behind (e.g. a lingering
+        # `base_url: https://openrouter.ai/api/v1` that misroutes the next provider
+        # the user configures). Everything else — hermes tuning defaults,
+        # mcp_servers — is still deep-merged through untouched below.
+        merged_model = {"default": ""}
+    else:
+        merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
+        merged_model["default"] = model
+        # Only force provider="auto" when a known API key is configured. If no
+        # API key is set, the user likely configured an OAuth provider (xai-oauth,
+        # qwen-oauth, etc.) via the dashboard's model picker — preserve that value
+        # so a container restart doesn't revert it to "auto" and break their session.
+        if any(data.get(k) for k in PROVIDER_KEYS):
+            merged_model["provider"] = "auto"
     merged["model"] = merged_model
 
     merged_terminal = dict(merged.get("terminal") if isinstance(merged.get("terminal"), dict) else {})
@@ -1119,7 +1127,7 @@ async def api_config_reset(request: Request):
     async with cfg_lock:
         if ENV_FILE.exists():
             ENV_FILE.unlink()
-        write_config_yaml({})
+        write_config_yaml({}, reset_model=True)
     return JSONResponse({"ok": True})
 
 

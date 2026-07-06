@@ -265,6 +265,19 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> Non
         # so a container restart doesn't revert it to "auto" and break their session.
         if any(data.get(k) for k in PROVIDER_KEYS):
             merged_model["provider"] = "auto"
+            # A known built-in provider (openrouter, minimax, nvidia, …) resolves
+            # its endpoint + credentials from the provider itself, so any inline
+            # model.base_url/api_key/api_mode is stale. base_url "takes precedence
+            # over provider" upstream (hermes_cli/config.py), so a leftover — e.g.
+            # a former `base_url: https://openrouter.ai/api/v1` from the hermes
+            # dashboard — silently misroutes EVERY provider you later switch to
+            # (all calls forced to that endpoint regardless of the active model).
+            # Strip them here on the provider-save path, mirroring hermes' own
+            # clear_model_endpoint_credentials() on a switch-away-from-custom. Our
+            # own custom-endpoint flow is unaffected: it lives in the separate
+            # custom_providers[] block below, never in model.base_url.
+            for _stale in ("base_url", "api_key", "api", "api_mode"):
+                merged_model.pop(_stale, None)
     merged["model"] = merged_model
 
     merged_terminal = dict(merged.get("terminal") if isinstance(merged.get("terminal"), dict) else {})

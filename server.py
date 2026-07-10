@@ -98,6 +98,12 @@ HERMES_DASHBOARD_HOST = "127.0.0.1"
 HERMES_DASHBOARD_PORT = int(os.environ.get("HERMES_DASHBOARD_PORT", "9119"))
 HERMES_DASHBOARD_URL = f"http://{HERMES_DASHBOARD_HOST}:{HERMES_DASHBOARD_PORT}"
 
+# Header hermes' own SPA uses to present its per-process session token
+# (hermes_cli/web_server.py's _SESSION_HEADER_NAME) — see
+# set_active_model_via_hermes()/_get_hermes_session_token() for why our own
+# server-to-server calls to the dashboard need it even on our loopback bind.
+_SESSION_TOKEN_HEADER = "X-Hermes-Session-Token"
+
 # Mirror dashboard-ref-only/auth_proxy.py: strip only `host` (httpx sets it)
 # and `transfer-encoding` (httpx recomputes it from the body). Keep everything
 # else — notably `authorization`, because the SPA uses Bearer tokens against
@@ -186,6 +192,47 @@ ENV_VARS = [
 
 SECRET_KEYS  = {k for k, _, _, s in ENV_VARS if s}
 PROVIDER_KEYS = [k for k, _, c, _ in ENV_VARS if c == "provider"]
+
+# Maps our own provider-key env var to hermes' OWN canonical provider id
+# (hermes_cli/auth.py PROVIDER_REGISTRY, verified against v2026.7.1). Used by
+# set_active_model_via_hermes() to pin an explicit model.provider via hermes'
+# own POST /api/model/set instead of leaving config.yaml on "auto" once 2+
+# provider keys exist in .env — see write_config_yaml()'s docstring for why
+# "auto" alone is unsafe with multiple providers configured. Several ids are
+# non-obvious renames upstream (dashscope->alibaba, glm->zai, kimi->kimi-coding,
+# hf->huggingface, ollama->ollama-cloud) — re-verify every entry against
+# hermes_cli/auth.py on a Hermes version bump (same audit as the WS allowlist).
+HERMES_PROVIDER_IDS = {
+    "OPENROUTER_API_KEY":    "openrouter",
+    "DEEPSEEK_API_KEY":      "deepseek",
+    "DASHSCOPE_API_KEY":     "alibaba",       # "Qwen Cloud" in hermes' own UI
+    "GLM_API_KEY":           "zai",           # "Z.AI / GLM"
+    "KIMI_API_KEY":          "kimi-coding",
+    "MINIMAX_API_KEY":       "minimax",
+    "HF_TOKEN":              "huggingface",
+    "NVIDIA_API_KEY":        "nvidia",
+    "NOVITA_API_KEY":        "novita",
+    "ARCEEAI_API_KEY":       "arcee",
+    "STEPFUN_API_KEY":       "stepfun",
+    "GEMINI_API_KEY":        "gemini",
+    "ANTHROPIC_API_KEY":     "anthropic",
+    "XAI_API_KEY":           "xai",
+    "AWS_ACCESS_KEY_ID":     "bedrock",
+    "COPILOT_GITHUB_TOKEN":  "copilot",
+    "GMI_API_KEY":           "gmi",
+    "OPENCODE_ZEN_API_KEY":  "opencode-zen",
+    "OPENCODE_GO_API_KEY":   "opencode-go",
+    "KILOCODE_API_KEY":      "kilocode",
+    "OLLAMA_API_KEY":        "ollama-cloud",
+    "AZURE_FOUNDRY_API_KEY": "azure-foundry",
+    # FIREWORKS_API_KEY intentionally omitted: "Fireworks AI" doesn't appear
+    # in hermes' own PROVIDER_REGISTRY or its dashboard's model switcher in
+    # v2026.7.1 — falls back to config.yaml's "auto" resolution (today's
+    # behavior) until a real provider id is confirmed against a live instance.
+    # CUSTOM_PROVIDER_API_KEY intentionally omitted: handled by the separate
+    # custom_providers[] block in write_config_yaml(), not this path.
+}
+
 CHANNEL_MAP  = {
     "Telegram":    "TELEGRAM_BOT_TOKEN",
     "Discord":     "DISCORD_BOT_TOKEN",
@@ -259,23 +306,43 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> Non
     else:
         merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
         merged_model["default"] = model
-        # Only force provider="auto" when a known API key is configured. If no
-        # API key is set, the user likely configured an OAuth provider (xai-oauth,
-        # qwen-oauth, etc.) via the dashboard's model picker — preserve that value
-        # so a container restart doesn't revert it to "auto" and break their session.
-        if any(data.get(k) for k in PROVIDER_KEYS):
+        current_provider = str(merged_model.get("provider") or "").strip()
+        # Only default to "auto" on a config that has never had a provider
+        # pinned. Once a provider is set explicitly — either by
+        # set_active_model_via_hermes() below (which delegates to hermes' own
+        # POST /api/model/set) or by hermes' own dashboard — PRESERVE it here.
+        # This function runs on every gateway start (Gateway.start() calls it
+        # fresh from .env every time a subprocess spawns), so unconditionally
+        # forcing "auto" whenever any key is present — the old behavior —
+        # would silently revert an explicit pin back to ambiguous "auto" on
+        # the very next restart. "auto" resolves by scanning hermes' own
+        # PROVIDER_REGISTRY in its OWN dict-insertion order and returning the
+        # first provider with a present env var — independent of which model
+        # string is configured. With exactly one provider key present this is
+        # harmless (only one possible match), but with two or more configured
+        # (e.g. minimax + nvidia) it silently pairs whichever provider sorts
+        # first in that registry with a model string that may belong to a
+        # DIFFERENT provider — the exact bug that made hermes route a
+        # deepseek-v4-pro (NVIDIA) request through MiniMax's own API with an
+        # unrecognized model name, producing a self-contradictory system
+        # prompt and a "confused" identity response.
+        if not current_provider and any(data.get(k) for k in PROVIDER_KEYS):
             merged_model["provider"] = "auto"
-            # A known built-in provider (openrouter, minimax, nvidia, …) resolves
-            # its endpoint + credentials from the provider itself, so any inline
-            # model.base_url/api_key/api_mode is stale. base_url "takes precedence
-            # over provider" upstream (hermes_cli/config.py), so a leftover — e.g.
-            # a former `base_url: https://openrouter.ai/api/v1` from the hermes
-            # dashboard — silently misroutes EVERY provider you later switch to
-            # (all calls forced to that endpoint regardless of the active model).
-            # Strip them here on the provider-save path, mirroring hermes' own
-            # clear_model_endpoint_credentials() on a switch-away-from-custom. Our
-            # own custom-endpoint flow is unaffected: it lives in the separate
-            # custom_providers[] block below, never in model.base_url.
+            current_provider = "auto"
+        # A known built-in provider (openrouter, minimax, nvidia, …) resolves
+        # its endpoint + credentials from the provider itself, so any inline
+        # model.base_url/api_key/api_mode is stale. base_url "takes precedence
+        # over provider" upstream (hermes_cli/config.py), so a leftover — e.g.
+        # a former `base_url: https://openrouter.ai/api/v1` from the hermes
+        # dashboard — silently misroutes EVERY provider you later switch to
+        # (all calls forced to that endpoint regardless of the active model).
+        # Strip them here, mirroring hermes' own clear_model_endpoint_credentials()
+        # on a switch-away-from-custom. Skipped only for "custom"/"local" —
+        # hermes' own convention for a user-supplied endpoint that legitimately
+        # needs its own base_url/api_key (our own custom-endpoint flow is
+        # unaffected either way: it lives in the separate custom_providers[]
+        # block below, never in model.base_url).
+        if current_provider and current_provider.lower() not in ("custom", "local"):
             for _stale in ("base_url", "api_key", "api", "api_mode"):
                 merged_model.pop(_stale, None)
     merged["model"] = merged_model
@@ -1101,6 +1168,99 @@ def get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
+_HERMES_SESSION_TOKEN_RE = re.compile(r'__HERMES_SESSION_TOKEN__\s*=\s*"([^"]*)"')
+
+
+async def _get_hermes_session_token() -> str:
+    """Scrape the dashboard's own ephemeral session token from its SPA shell.
+
+    Hermes gates every non-public ``/api/*`` route behind a per-process
+    random ``_SESSION_TOKEN`` — a legacy check in hermes_cli/web_server.py's
+    ``auth_middleware`` that's SEPARATE from (and still active alongside) the
+    OAuth gate that invariant 3 already covers. Loopback bind only turns off
+    the OAuth gate (``auth_required``); it does not exempt this token check.
+    A tokenless call like a plain server-to-server POST 401s unconditionally.
+
+    The only way to obtain a valid token without a browser is the same way
+    the SPA itself does: on a loopback (ungated) bind, hermes injects it into
+    every served HTML shell as ``window.__HERMES_SESSION_TOKEN__="..."``
+    (hermes_cli/web_server.py's ``_serve_index``). That HTML-serving catch-all
+    route is not under ``/api/``, so it is never itself gated — no chicken-
+    and-egg problem. Not cached: cheap (one loopback GET), and self-heals
+    across a dashboard restart (which rotates the token) without needing
+    invalidation logic. Re-verify the injected variable name against
+    hermes_cli/web_server.py on a Hermes version bump — if it's ever renamed
+    or removed, this degrades to the pre-existing "no token" 401 handled
+    below, not a crash.
+    """
+    client = get_http_client()
+    resp = await client.get(f"{HERMES_DASHBOARD_URL}/", timeout=httpx.Timeout(10.0))
+    resp.raise_for_status()
+    match = _HERMES_SESSION_TOKEN_RE.search(resp.text)
+    return match.group(1) if match else ""
+
+
+async def set_active_model_via_hermes(provider_id: str, model: str) -> str | None:
+    """Pin model.provider + model.default via hermes' own POST /api/model/set.
+
+    Delegates to hermes_cli/web_server.py's _apply_main_model_assignment — the
+    same code path its dashboard's "Switch Model" dialog and flat Config page
+    use — instead of us hand-writing config.yaml's model block. Hermes always
+    resolves an EXPLICIT provider there (never "auto") and correctly clears
+    stale base_url/api_key only on a genuine provider switch, preserving them
+    on a same-provider re-pick.
+
+    Necessary because our own /setup wizard has a single shared "LLM Model"
+    field across every configured provider: once 2+ provider keys exist in
+    .env, config.yaml's model.provider="auto" (write_config_yaml()'s old
+    unconditional default) lets hermes resolve to the WRONG provider — the
+    first match in its own internal PROVIDER_REGISTRY dict order — paired
+    with a model string that belongs to a DIFFERENT provider.
+
+    Best-effort: on any failure (dashboard not up yet, network hiccup, no
+    session token obtainable) we leave whatever write_config_yaml() already
+    wrote in place (single-provider "auto" default, or a previously-pinned
+    provider preserved as-is) rather than blocking the save. Returns a
+    human-readable warning string on failure, or None on success.
+    """
+    client = get_http_client()
+    try:
+        session_token = await _get_hermes_session_token()
+    except httpx.HTTPError as e:
+        return f"Could not fetch a Hermes session token to pin {provider_id} ({e}); using auto-resolution instead."
+    headers = {_SESSION_TOKEN_HEADER: session_token} if session_token else {}
+
+    try:
+        resp = await client.post(
+            f"{HERMES_DASHBOARD_URL}/api/model/set",
+            json={
+                "scope": "main",
+                "provider": provider_id,
+                "model": model,
+                # We have no UI to show hermes' own "this model looks
+                # expensive, are you sure?" confirmation — the user already
+                # confirmed intent by pasting a key and a model name here.
+                "confirm_expensive_model": True,
+            },
+            headers=headers,
+            timeout=httpx.Timeout(15.0),
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+        return f"Could not reach the Hermes dashboard to pin {provider_id} ({e}); using auto-resolution instead."
+    except httpx.RequestError as e:
+        return f"Hermes model/set request failed ({e}); using auto-resolution instead."
+
+    if resp.status_code != 200:
+        return f"Hermes rejected the {provider_id} model/provider pin (HTTP {resp.status_code}); using auto-resolution instead."
+    try:
+        data = resp.json()
+    except Exception:
+        return None  # 200 with an unparseable body — nothing actionable to report
+    if data.get("ok") is False:
+        return data.get("confirm_message") or f"Hermes did not apply the {provider_id} model/provider pin; using auto-resolution instead."
+    return None
+
+
 # ── Route handlers ────────────────────────────────────────────────────────────
 async def page_index(request: Request):
     if err := guard(request): return err
@@ -1127,6 +1287,11 @@ async def api_config_put(request: Request):
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
     try:
         restart = body.pop("_restart", False)
+        # Set by the setup wizard to the ENV_VARS key of whichever provider's
+        # dropdown entry was selected in this save action (e.g. "NVIDIA_API_KEY")
+        # — empty when the user saved without touching a provider (e.g. just
+        # toggling a messaging channel). See set_active_model_via_hermes().
+        active_provider_key = str(body.pop("_active_provider_key", "") or "").strip()
         new_vars = body.get("vars", {})
         async with cfg_lock:
             existing = read_env(ENV_FILE)
@@ -1136,13 +1301,23 @@ async def api_config_put(request: Request):
                     merged[k] = v
             write_env(ENV_FILE, merged)
             write_config_yaml(merged)
+
+        model_warning = None
+        hermes_provider_id = HERMES_PROVIDER_IDS.get(active_provider_key)
+        model_value = merged.get("LLM_MODEL", "").strip()
+        if hermes_provider_id and model_value:
+            model_warning = await set_active_model_via_hermes(hermes_provider_id, model_value)
+
         if restart:
             asyncio.create_task(gw.restart())
             # The dashboard (and its embedded Chat tab) only ever sees the env
             # it was spawned with — a newly-saved provider key doesn't reach
             # the already-running process otherwise. See Dashboard.restart().
             asyncio.create_task(dash.restart())
-        return JSONResponse({"ok": True, "restarting": restart})
+        resp = {"ok": True, "restarting": restart}
+        if model_warning:
+            resp["warning"] = model_warning
+        return JSONResponse(resp)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 

@@ -98,6 +98,12 @@ HERMES_DASHBOARD_HOST = "127.0.0.1"
 HERMES_DASHBOARD_PORT = int(os.environ.get("HERMES_DASHBOARD_PORT", "9119"))
 HERMES_DASHBOARD_URL = f"http://{HERMES_DASHBOARD_HOST}:{HERMES_DASHBOARD_PORT}"
 
+# Header hermes' own SPA uses to present its per-process session token
+# (hermes_cli/web_server.py's _SESSION_HEADER_NAME) — see
+# set_active_model_via_hermes()/_get_hermes_session_token() for why our own
+# server-to-server calls to the dashboard need it even on our loopback bind.
+_SESSION_TOKEN_HEADER = "X-Hermes-Session-Token"
+
 # Mirror dashboard-ref-only/auth_proxy.py: strip only `host` (httpx sets it)
 # and `transfer-encoding` (httpx recomputes it from the body). Keep everything
 # else — notably `authorization`, because the SPA uses Bearer tokens against
@@ -1162,6 +1168,38 @@ def get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
+_HERMES_SESSION_TOKEN_RE = re.compile(r'__HERMES_SESSION_TOKEN__\s*=\s*"([^"]*)"')
+
+
+async def _get_hermes_session_token() -> str:
+    """Scrape the dashboard's own ephemeral session token from its SPA shell.
+
+    Hermes gates every non-public ``/api/*`` route behind a per-process
+    random ``_SESSION_TOKEN`` — a legacy check in hermes_cli/web_server.py's
+    ``auth_middleware`` that's SEPARATE from (and still active alongside) the
+    OAuth gate that invariant 3 already covers. Loopback bind only turns off
+    the OAuth gate (``auth_required``); it does not exempt this token check.
+    A tokenless call like a plain server-to-server POST 401s unconditionally.
+
+    The only way to obtain a valid token without a browser is the same way
+    the SPA itself does: on a loopback (ungated) bind, hermes injects it into
+    every served HTML shell as ``window.__HERMES_SESSION_TOKEN__="..."``
+    (hermes_cli/web_server.py's ``_serve_index``). That HTML-serving catch-all
+    route is not under ``/api/``, so it is never itself gated — no chicken-
+    and-egg problem. Not cached: cheap (one loopback GET), and self-heals
+    across a dashboard restart (which rotates the token) without needing
+    invalidation logic. Re-verify the injected variable name against
+    hermes_cli/web_server.py on a Hermes version bump — if it's ever renamed
+    or removed, this degrades to the pre-existing "no token" 401 handled
+    below, not a crash.
+    """
+    client = get_http_client()
+    resp = await client.get(f"{HERMES_DASHBOARD_URL}/", timeout=httpx.Timeout(10.0))
+    resp.raise_for_status()
+    match = _HERMES_SESSION_TOKEN_RE.search(resp.text)
+    return match.group(1) if match else ""
+
+
 async def set_active_model_via_hermes(provider_id: str, model: str) -> str | None:
     """Pin model.provider + model.default via hermes' own POST /api/model/set.
 
@@ -1179,13 +1217,19 @@ async def set_active_model_via_hermes(provider_id: str, model: str) -> str | Non
     first match in its own internal PROVIDER_REGISTRY dict order — paired
     with a model string that belongs to a DIFFERENT provider.
 
-    Best-effort: on any failure (dashboard not up yet, network hiccup) we
-    leave whatever write_config_yaml() already wrote in place (single-provider
-    "auto" default, or a previously-pinned provider preserved as-is) rather
-    than blocking the save. Returns a human-readable warning string on
-    failure, or None on success.
+    Best-effort: on any failure (dashboard not up yet, network hiccup, no
+    session token obtainable) we leave whatever write_config_yaml() already
+    wrote in place (single-provider "auto" default, or a previously-pinned
+    provider preserved as-is) rather than blocking the save. Returns a
+    human-readable warning string on failure, or None on success.
     """
     client = get_http_client()
+    try:
+        session_token = await _get_hermes_session_token()
+    except httpx.HTTPError as e:
+        return f"Could not fetch a Hermes session token to pin {provider_id} ({e}); using auto-resolution instead."
+    headers = {_SESSION_TOKEN_HEADER: session_token} if session_token else {}
+
     try:
         resp = await client.post(
             f"{HERMES_DASHBOARD_URL}/api/model/set",
@@ -1198,6 +1242,7 @@ async def set_active_model_via_hermes(provider_id: str, model: str) -> str | Non
                 # confirmed intent by pasting a key and a model name here.
                 "confirm_expensive_model": True,
             },
+            headers=headers,
             timeout=httpx.Timeout(15.0),
         )
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:

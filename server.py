@@ -311,6 +311,22 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> Non
         yaml.safe_dump(merged, f, sort_keys=False, default_flow_style=False)
 
 
+def build_hermes_env() -> dict[str, str]:
+    """Merge OS env + HERMES_HOME + .env file contents for a hermes subprocess.
+
+    .env values take priority over Railway env vars. We build the env this way
+    so hermes's own dotenv loading (which reads the same file) doesn't shadow
+    our values. Shared by every hermes subprocess we spawn (gateway, dashboard)
+    — a subprocess started without this (e.g. via a bare env=None, which just
+    inherits our own process env from container boot) never sees provider keys
+    saved later through the setup wizard, since those only ever land in
+    HERMES_HOME/.env, not in our own os.environ.
+    """
+    env = {**os.environ, "HERMES_HOME": HERMES_HOME}
+    env.update(read_env(ENV_FILE))
+    return env
+
+
 def write_env(path: Path, data: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     cat_order = ["model", "provider", "bedrock", "azure", "custom", "tool",
@@ -835,18 +851,27 @@ class Gateway:
         self.state = "starting"
         self._stopping = False
         try:
-            # .env values take priority over Railway env vars.
-            # We build the env this way so hermes's own dotenv loading
-            # (which reads the same file) doesn't shadow our values.
-            env = {**os.environ, "HERMES_HOME": HERMES_HOME}
-            env.update(read_env(ENV_FILE))
+            env = build_hermes_env()
             model = env.get("LLM_MODEL", "")
             provider_key = next((env.get(k, "") for k in PROVIDER_KEYS if env.get(k)), "")
             print(f"[gateway] model={model or '⚠ NOT SET'} | provider_key={'set' if provider_key else '⚠ NOT SET'}", flush=True)
             # Write config.yaml so hermes picks up the model (env vars alone aren't always enough)
             write_config_yaml(read_env(ENV_FILE))
+            # --replace: force-displace any existing gateway.pid lock holder
+            # before claiming it. Without this, a lock left behind by a prior
+            # incarnation this supervisor doesn't recognize as "our" dead
+            # process (e.g. hermes' own dashboard spawns its own detached
+            # `hermes gateway restart` via its native /api/gateway/restart
+            # action, entirely outside this class's tracking) makes every
+            # subsequent plain `hermes gateway` invocation refuse to start
+            # ("Another gateway instance is already running"), which
+            # _clear_stale_pidfile() can never self-heal since it only clears
+            # a pid file matching the exact pid THIS supervisor just watched
+            # die. --replace is hermes' own blessed fix for exactly this
+            # class of stuck-lock — it force-kills whatever holds the lock
+            # (graceful SIGTERM, escalating to SIGKILL) before claiming it.
             self.proc = await asyncio.create_subprocess_exec(
-                "hermes", "gateway",
+                "hermes", "gateway", "run", "--replace",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
@@ -970,6 +995,16 @@ class Dashboard:
     The dashboard is independent of the gateway: it reads config files
     directly and tolerates a stopped gateway.
 
+    Spawned with the same merged env (OS env + HERMES_HOME + .env contents)
+    as the gateway — see build_hermes_env(). Without it, the dashboard process
+    only ever sees our own os.environ from container boot, before any
+    provider key exists; the embedded Chat tab's agent-init then fails with
+    "No inference provider configured" even though /setup shows a key saved,
+    because hermes' own provider auto-resolution (hermes_cli/auth.py) reads
+    credentials via plain os.getenv(), not by re-parsing .env from disk. Since
+    the dashboard only starts once at boot, restart() must be called whenever
+    a provider key is saved so the running process picks up the new env.
+
     All subprocess output is streamed to our stdout (→ Railway logs) with a
     `[dashboard]` prefix AND retained in a ring buffer for diagnostics.
     Unexpected exits are explicitly logged with their return code.
@@ -1003,6 +1038,7 @@ class Dashboard:
                 # so the PTY child spawns instantly on first chat connect.
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                env=build_hermes_env(),
             )
             print(f"[dashboard] spawned pid={self.proc.pid} → {HERMES_DASHBOARD_URL}", flush=True)
             self._drain_task = asyncio.create_task(self._drain())
@@ -1035,6 +1071,17 @@ class Dashboard:
         except asyncio.TimeoutError:
             self.proc.kill()
             await self.proc.wait()
+
+    async def restart(self):
+        """Respawn so a freshly-saved provider key reaches the embedded Chat tab.
+
+        Drops any live /api/pty, /api/ws, /api/events connections (the
+        reverse-proxy WS pumps just see the upstream close and the SPA
+        reconnects) — an acceptable trade-off since the alternative is Chat
+        staying broken until a full redeploy.
+        """
+        await self.stop()
+        await self.start()
 
 
 dash = Dashboard()
@@ -1091,6 +1138,10 @@ async def api_config_put(request: Request):
             write_config_yaml(merged)
         if restart:
             asyncio.create_task(gw.restart())
+            # The dashboard (and its embedded Chat tab) only ever sees the env
+            # it was spawned with — a newly-saved provider key doesn't reach
+            # the already-running process otherwise. See Dashboard.restart().
+            asyncio.create_task(dash.restart())
         return JSONResponse({"ok": True, "restarting": restart})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

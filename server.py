@@ -1,5 +1,5 @@
 """
-Hermes Agent — Railway admin server.
+OneHub Agent — Railway admin server.
 
 Responsibilities:
   - Admin UI / setup wizard at /setup (Starlette + Jinja, cookie-auth guarded)

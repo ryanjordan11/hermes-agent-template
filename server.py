@@ -211,7 +211,6 @@ HERMES_PROVIDER_IDS = {
     "MINIMAX_API_KEY":       "minimax",
     "HF_TOKEN":              "huggingface",
     "NVIDIA_API_KEY":        "nvidia",
-    "NOVITA_API_KEY":        "novita",
     "ARCEEAI_API_KEY":       "arcee",
     "STEPFUN_API_KEY":       "stepfun",
     "GEMINI_API_KEY":        "gemini",
@@ -225,13 +224,46 @@ HERMES_PROVIDER_IDS = {
     "KILOCODE_API_KEY":      "kilocode",
     "OLLAMA_API_KEY":        "ollama-cloud",
     "AZURE_FOUNDRY_API_KEY": "azure-foundry",
-    # FIREWORKS_API_KEY intentionally omitted: "Fireworks AI" doesn't appear
-    # in hermes' own PROVIDER_REGISTRY or its dashboard's model switcher in
-    # v2026.7.1 — falls back to config.yaml's "auto" resolution (today's
-    # behavior) until a real provider id is confirmed against a live instance.
-    # CUSTOM_PROVIDER_API_KEY intentionally omitted: handled by the separate
-    # custom_providers[] block in write_config_yaml(), not this path.
+    # These three are NOT in hermes' own PROVIDER_REGISTRY — verified against
+    # BOTH hermes_cli/auth.py (resolve_provider(), used by the CLI/"auto"
+    # env-var auto-detect loop) AND hermes_cli/runtime_provider.py
+    # (resolve_runtime_provider(), what the gateway/embedded Chat tab actually
+    # call at agent-init) at v2026.7.1. Neither ever discovers them: "auto"
+    # only scans PROVIDER_REGISTRY's known env vars (these aren't in it, so
+    # they're invisible to it, full stop), and pinning one of these strings
+    # as an explicit provider id raises "Unknown provider '<id>'" — both
+    # produce a dead agent ("No inference provider configured" / "Unknown
+    # provider"), confirmed live for a 9Router custom-endpoint deployment.
+    # The only way any of them work is the same mechanism hermes' OWN
+    # dashboard uses for a self-hosted/aggregator endpoint: provider="custom"
+    # plus an explicit base_url + api_key written onto model.* directly
+    # (hermes_cli/runtime_provider.py's bare-"custom" trust path reads
+    # model.base_url/model.api_key from the model block — it does NOT consult
+    # config.yaml's custom_providers[] list for this, that list is display/
+    # bookkeeping only). See CUSTOM_STYLE_BASE_URLS and
+    # set_active_model_via_hermes(). Re-verify FIREWORKS_API_KEY/NOVITA_API_KEY
+    # base URLs against those providers' own docs (not hermes') if they ever
+    # change their API surface.
+    "CUSTOM_PROVIDER_API_KEY": "custom",   # base_url is user-supplied (CUSTOM_PROVIDER_BASE_URL) — any OpenAI-compatible endpoint, e.g. 9Router
+    "FIREWORKS_API_KEY":       "custom",
+    "NOVITA_API_KEY":          "custom",
 }
+
+# Fixed base URLs for the "custom"-style providers above whose credential is a
+# plain API key against a well-known OpenAI-compatible endpoint. Absent here
+# (CUSTOM_PROVIDER_API_KEY) means the base_url is user-supplied instead — see
+# CUSTOM_PROVIDER_BASE_URL.
+CUSTOM_STYLE_BASE_URLS = {
+    "FIREWORKS_API_KEY": "https://api.fireworks.ai/inference/v1",
+    "NOVITA_API_KEY":    "https://api.novita.ai/openai/v1",
+}
+
+# Every ENV_VARS "provider" key pinned to the literal "custom" id above.
+# Computed, not hand-maintained, so a future provider added to
+# HERMES_PROVIDER_IDS with value "custom" is automatically covered by both
+# api_config_put()'s pin call and write_config_yaml()'s fallback below —
+# no other code needs to change.
+HERMES_CUSTOM_STYLE_KEYS = {k for k, v in HERMES_PROVIDER_IDS.items() if v == "custom"}
 
 CHANNEL_MAP  = {
     "Telegram":    "TELEGRAM_BOT_TOKEN",
@@ -326,9 +358,33 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> Non
         # deepseek-v4-pro (NVIDIA) request through MiniMax's own API with an
         # unrecognized model name, producing a self-contradictory system
         # prompt and a "confused" identity response.
-        if not current_provider and any(data.get(k) for k in PROVIDER_KEYS):
-            merged_model["provider"] = "auto"
-            current_provider = "auto"
+        if not current_provider:
+            named_key = next(
+                (k for k in PROVIDER_KEYS if k not in HERMES_CUSTOM_STYLE_KEYS and data.get(k)),
+                None,
+            )
+            custom_style_key = next((k for k in HERMES_CUSTOM_STYLE_KEYS if data.get(k)), None)
+            if named_key:
+                merged_model["provider"] = "auto"
+                current_provider = "auto"
+            elif custom_style_key:
+                # CUSTOM_PROVIDER_API_KEY / FIREWORKS_API_KEY / NOVITA_API_KEY are
+                # NOT in hermes' own PROVIDER_REGISTRY (see HERMES_PROVIDER_IDS'
+                # comment) — "auto" can never discover them, so defaulting to
+                # "auto" here (the old behavior) left the agent with no usable
+                # provider whenever one of these was the ONLY key configured.
+                # This is the synchronous safety net for the async
+                # set_active_model_via_hermes() pin in api_config_put(): this
+                # function also runs directly from .env on every gateway boot
+                # (Gateway.start()), so it must independently produce a
+                # resolvable config even if that pin call never ran or failed.
+                merged_model["provider"] = "custom"
+                merged_model["base_url"] = (
+                    CUSTOM_STYLE_BASE_URLS.get(custom_style_key)
+                    or data.get("CUSTOM_PROVIDER_BASE_URL", "").strip()
+                )
+                merged_model["api_key"] = data.get(custom_style_key, "").strip()
+                current_provider = "custom"
         # A known built-in provider (openrouter, minimax, nvidia, …) resolves
         # its endpoint + credentials from the provider itself, so any inline
         # model.base_url/api_key/api_mode is stale. base_url "takes precedence
@@ -338,10 +394,11 @@ def write_config_yaml(data: dict[str, str], *, reset_model: bool = False) -> Non
         # (all calls forced to that endpoint regardless of the active model).
         # Strip them here, mirroring hermes' own clear_model_endpoint_credentials()
         # on a switch-away-from-custom. Skipped only for "custom"/"local" —
-        # hermes' own convention for a user-supplied endpoint that legitimately
-        # needs its own base_url/api_key (our own custom-endpoint flow is
-        # unaffected either way: it lives in the separate custom_providers[]
-        # block below, never in model.base_url).
+        # hermes' own convention for a user-supplied (or fixed-URL aggregator)
+        # endpoint that legitimately needs its own base_url/api_key set
+        # directly on model.* (see the "custom_style_key" branch above —
+        # hermes' runtime resolver reads model.base_url/api_key directly, NOT
+        # the separate custom_providers[] block below, which is display-only).
         if current_provider and current_provider.lower() not in ("custom", "local"):
             for _stale in ("base_url", "api_key", "api", "api_mode"):
                 merged_model.pop(_stale, None)
@@ -1200,7 +1257,9 @@ async def _get_hermes_session_token() -> str:
     return match.group(1) if match else ""
 
 
-async def set_active_model_via_hermes(provider_id: str, model: str) -> str | None:
+async def set_active_model_via_hermes(
+    provider_id: str, model: str, *, base_url: str = "", api_key: str = ""
+) -> str | None:
     """Pin model.provider + model.default via hermes' own POST /api/model/set.
 
     Delegates to hermes_cli/web_server.py's _apply_main_model_assignment — the
@@ -1216,6 +1275,19 @@ async def set_active_model_via_hermes(provider_id: str, model: str) -> str | Non
     unconditional default) lets hermes resolve to the WRONG provider — the
     first match in its own internal PROVIDER_REGISTRY dict order — paired
     with a model string that belongs to a DIFFERENT provider.
+
+    base_url/api_key are forwarded verbatim into this same request's own
+    ``base_url``/``api_key`` fields (hermes_cli/web_server.py's
+    ``ModelAssignment`` schema — "Only honored for custom/local providers on
+    the main slot"). REQUIRED for provider_id="custom": hermes' actual
+    runtime resolver (hermes_cli/runtime_provider.py, what the gateway/Chat
+    tab call at agent-init) only trusts a bare "custom" provider when
+    model.base_url is ALSO set directly on the model block — it never
+    consults config.yaml's separate custom_providers[] list (that's
+    display/bookkeeping only, for hermes' own Keys-tab picker). Passing them
+    lets hermes write model.base_url/model.api_key itself; it also
+    auto-registers a matching custom_providers catalog entry as a side
+    effect, mirroring its own dashboard's custom-endpoint flow.
 
     Best-effort: on any failure (dashboard not up yet, network hiccup, no
     session token obtainable) we leave whatever write_config_yaml() already
@@ -1237,6 +1309,8 @@ async def set_active_model_via_hermes(provider_id: str, model: str) -> str | Non
                 "scope": "main",
                 "provider": provider_id,
                 "model": model,
+                "base_url": base_url,
+                "api_key": api_key,
                 # We have no UI to show hermes' own "this model looks
                 # expensive, are you sure?" confirmation — the user already
                 # confirmed intent by pasting a key and a model name here.
@@ -1306,7 +1380,17 @@ async def api_config_put(request: Request):
         hermes_provider_id = HERMES_PROVIDER_IDS.get(active_provider_key)
         model_value = merged.get("LLM_MODEL", "").strip()
         if hermes_provider_id and model_value:
-            model_warning = await set_active_model_via_hermes(hermes_provider_id, model_value)
+            pin_base_url = ""
+            pin_api_key = ""
+            if hermes_provider_id == "custom":
+                pin_base_url = (
+                    CUSTOM_STYLE_BASE_URLS.get(active_provider_key)
+                    or merged.get("CUSTOM_PROVIDER_BASE_URL", "").strip()
+                )
+                pin_api_key = merged.get(active_provider_key, "").strip()
+            model_warning = await set_active_model_via_hermes(
+                hermes_provider_id, model_value, base_url=pin_base_url, api_key=pin_api_key
+            )
 
         if restart:
             asyncio.create_task(gw.restart())

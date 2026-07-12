@@ -353,7 +353,7 @@ routes = [
     Route("/api/gw/stop", api_gw_stop, methods=["POST"]),
     Route("/api/gw/restart", api_gw_restart, methods=["POST"]),
     Route("/api/config/reset", api_config_reset, methods=["POST"]),
-    Route("{path:path}", route_setup_404),
+    Route("/{path:path}", route_setup_404),
 ]
 
 

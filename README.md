@@ -1,10 +1,10 @@
-# Hermes Agent — Railway Template
+# OneHub Agent — Railway Template
 
-Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on [Railway](https://railway.app) with a web-based admin dashboard for configuration, gateway management, and user pairing.
+Deploy [OneHub Agent](https://github.com/NousResearch/hermes-agent) on [Railway](https://railway.app) with a web-based admin dashboard for configuration, gateway management, and user pairing.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/hermes-agent-ai?referralCode=QXdhdr&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
-> Hermes Agent is an autonomous AI agent by [Nous Research](https://nousresearch.com/) that lives on your server, connects to your messaging channels (Telegram, Discord, Slack, etc.), and gets more capable the longer it runs.
+> OneHub Agent is an autonomous AI agent by [Nous Research](https://nousresearch.com/) that lives on your server, connects to your messaging channels (Telegram, Discord, Slack, etc.), and gets more intelligent over time through multi-turn memory and planning.
 
 <!-- TODO: Add dashboard screenshot -->
 <!-- ![Dashboard](docs/dashboard.png) -->
@@ -13,7 +13,7 @@ Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on [Railway]
 
 - **Admin Dashboard** — dark-themed UI to configure providers, channels, tools, and manage the gateway
 - **One-Page Setup** — provider dropdown, checkbox-based channel/tool toggles — no config files to edit
-- **Gateway Management** — start, stop, restart the Hermes gateway from the browser
+- **Gateway Management** — start, stop, restart the OneHub gateway from the browser
 - **Live Status** — stat cards for gateway state, uptime, model, and pending pairing requests
 - **Live Logs** — streaming gateway log viewer
 - **User Pairing** — approve or deny users who message your bot, revoke access anytime
@@ -32,7 +32,7 @@ The easiest way to get started:
 
 ### 2. Set Up a Telegram Bot (fastest channel)
 
-Hermes Agent interacts entirely through messaging channels — there is no chat UI like ChatGPT. Telegram is the quickest to set up:
+OneHub Agent interacts entirely through messaging channels — there is no chat UI like ChatGPT. Telegram is the quickest to set up:
 
 1. Open Telegram and message [@BotFather](https://t.me/BotFather)
 2. Send `/newbot`, follow the prompts, and copy the **Bot Token**
@@ -66,7 +66,7 @@ Message your Telegram bot. If you're a new user, a pairing request will appear i
 | `PORT` | `8080` | Web server port (set automatically by Railway) |
 | `ADMIN_USERNAME` | `admin` | Basic auth username |
 | `ADMIN_PASSWORD` | *(auto-generated)* | Basic auth password — if unset, a random password is printed to logs |
-| `HERMES_REF` | *(pinned in Dockerfile)* | Hermes Agent version to install (any upstream git tag/branch). Set this to override the Dockerfile default without editing code — see [Updating Hermes](#updating-hermes). |
+| `ONEHUB_REF` | *(pinned in Dockerfile)* | OneHub Agent version to install (any upstream git tag/branch). Set this to override the Dockerfile default without editing code — see [Updating OneHub](#updating-onehub). |
 
 All other configuration (LLM provider, model, channels, tools) is managed through the admin dashboard.
 
@@ -90,30 +90,30 @@ Railway Container
 │   ├── /            — Admin dashboard (Basic Auth)
 │   ├── /health      — Health check (no auth)
 │   └── /api/*       — Config, status, logs, gateway, pairing
-└── hermes gateway   — Managed as async subprocess
+└── OneHub gateway   — Managed as async subprocess
 ```
 
-The admin server runs on `$PORT` and manages the Hermes gateway as a child process. Config is stored in `/data/.hermes/.env` and `/data/.hermes/config.yaml`. Gateway stdout/stderr is captured into a ring buffer and streamed to the Logs panel.
+The admin server runs on `$PORT` and manages the OneHub gateway as a child process. Config is stored in `/data/.onehub/.env` and `/data/.onehub/config.yaml`. Gateway stdout/stderr is captured into a ring buffer and streamed to the Logs panel.
 
 ## Running Locally
 
 ```bash
-docker build -t hermes-agent .
-docker run --rm -it -p 8080:8080 -e PORT=8080 -e ADMIN_PASSWORD=changeme -v hermes-data:/data hermes-agent
+docker build -t onehub-agent .
+docker run --rm -it -p 8080:8080 -e PORT=8080 -e ADMIN_PASSWORD=changeme -v onehub-data:/data onehub-agent
 ```
 
 Open `http://localhost:8080` and log in with `admin` / `changeme`.
 
-## Updating Hermes
+## Updating OneHub
 
-This template pins a specific Hermes Agent release in the `Dockerfile` (`ARG HERMES_REF`, currently `v2026.7.1`). To upgrade:
+This template pins a specific OneHub Agent release in the `Dockerfile` (`ARG ONEHUB_REF`, currently `v2026.7.1`). To upgrade:
 
-- **Recommended:** set a `HERMES_REF` service variable in Railway to any upstream [release tag](https://github.com/NousResearch/hermes-agent/releases) (e.g. `v2026.7.1`), then redeploy. It's passed in as a Docker build arg and overrides the Dockerfile default — no code change needed.
-- **Or** bump `ARG HERMES_REF` in the `Dockerfile` and redeploy.
+- **Recommended:** set a `ONEHUB_REF` service variable in Railway to any upstream [release tag](https://github.com/NousResearch/hermes-agent/releases) (e.g. `v2026.7.1`), then redeploy. It's passed in as a Docker build arg and overrides the Dockerfile default — no code change needed.
+- **Or** bump `ARG ONEHUB_REF` in the `Dockerfile` and redeploy.
 
-The "Update" button inside the Hermes dashboard is a **no-op on Railway** (it detects a container install and refuses) — the image is immutable, so a runtime self-update wouldn't survive a redeploy. Bump `HERMES_REF` and redeploy instead. When jumping releases, re-check that the Dockerfile's install extras still match upstream's `pyproject.toml`.
+The "Update" button inside the OneHub dashboard is a **no-op on Railway** (it detects a container install and refuses) — the image is immutable, so a runtime self-update wouldn't survive a redeploy. Bump `ONEHUB_REF` and redeploy instead. When jumping releases, re-check that the Dockerfile's install extras still match upstream's `pyproject.toml`.
 
 ## Credits
 
-- [Hermes Agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com/)
+- [OneHub Agent](https://github.com/NousResearch/hermes-agent) by [Nous Research](https://nousresearch.com/)
 - UI inspired by [OpenClaw](https://github.com/praveen-ks-2001/openclaw-railway) admin template

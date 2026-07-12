@@ -5,7 +5,7 @@ Responsibilities:
   - Admin UI / setup wizard at /setup (Starlette + Jinja, cookie-auth guarded)
   - Management API at /setup/api/* (config, status, logs, gateway, pairing)
   - Reverse proxy at / and /* → native Hermes dashboard (hermes_cli/web_server, on 127.0.0.1:9119)
-  - Managed subprocesses: `hermes gateway` (agent) and `hermes dashboard` (native UI)
+  - Managed subprocesses: `onehub gateway` (agent) and `hermes dashboard` (native UI)
   - Cookie-based session auth at /login (HMAC-signed, 7-day expiry, httponly)
 
 Auth model: Basic Auth was dropped in favor of cookies because the Hermes React

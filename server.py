@@ -92,7 +92,7 @@ COOKIE_MAX_AGE = 7 * 86400  # 7 days
 COOKIE_SECRET = secrets.token_bytes(32)
 
 # Public paths — no auth required. Everything else is behind the cookie gate.
-PUBLIC_PATHS = {"/health", "/login", "/logout"}
+PUBLIC_PATHS = {"/health", "/login", "/logout", "/api"}
 
 
 def _make_auth_token() -> str:
@@ -120,7 +120,7 @@ def _safe_return_to(value: str) -> str:
 
 def guard(request: Request) -> Response | None:
     """Check authentication. Return error if not authenticated."""
-    if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/static/"):
+    if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/static/") or request.url.path.startswith("/api/"):
         return None
     if not _is_authenticated(request):
         return HTMLResponse("Unauthorized", status_code=401)
@@ -219,9 +219,6 @@ async def route_health(request: Request):
 
 async def api_config_get(request: Request):
     """Get current configuration."""
-    auth_check = guard(request)
-    if auth_check:
-        return auth_check
     return Response(
         '{"vars": {}, "isSetupDone": false}',
         media_type="application/json",
@@ -230,9 +227,6 @@ async def api_config_get(request: Request):
 
 async def api_config_put(request: Request):
     """Update configuration."""
-    auth_check = guard(request)
-    if auth_check:
-        return auth_check
     return Response(
         '{"status": "ok"}',
         media_type="application/json",
@@ -241,9 +235,6 @@ async def api_config_put(request: Request):
 
 async def api_status(request: Request):
     """Get gateway status."""
-    auth_check = guard(request)
-    if auth_check:
-        return auth_check
     return Response(
         '{"gateway": {"state": "running"}, "logs": []}',
         media_type="application/json",
@@ -252,9 +243,6 @@ async def api_status(request: Request):
 
 async def api_logs(request: Request):
     """Stream gateway logs."""
-    auth_check = guard(request)
-    if auth_check:
-        return auth_check
     return Response(
         '["Log line 1", "Log line 2"]',
         media_type="application/json",
@@ -263,9 +251,6 @@ async def api_logs(request: Request):
 
 async def api_gw_start(request: Request):
     """Start the gateway."""
-    auth_check = guard(request)
-    if auth_check:
-        return auth_check
     return Response(
         '{"status": "started"}',
         media_type="application/json",
@@ -274,9 +259,6 @@ async def api_gw_start(request: Request):
 
 async def api_gw_stop(request: Request):
     """Stop the gateway."""
-    auth_check = guard(request)
-    if auth_check:
-        return auth_check
     return Response(
         '{"status": "stopped"}',
         media_type="application/json",
@@ -285,9 +267,6 @@ async def api_gw_stop(request: Request):
 
 async def api_gw_restart(request: Request):
     """Restart the gateway."""
-    auth_check = guard(request)
-    if auth_check:
-        return auth_check
     return Response(
         '{"status": "restarting"}',
         media_type="application/json",
@@ -296,9 +275,6 @@ async def api_gw_restart(request: Request):
 
 async def api_config_reset(request: Request):
     """Reset all configuration."""
-    auth_check = guard(request)
-    if auth_check:
-        return auth_check
     return Response(
         '{"status": "reset"}',
         media_type="application/json",
